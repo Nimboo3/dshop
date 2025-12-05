@@ -426,8 +426,70 @@ async function processRfmCalculation(job: Job<RfmCalculationJobData>): Promise<v
   const { tenantId, customerId, triggeredBy } = job.data;
   log.info({ jobId: job.id, tenantId, customerId, triggeredBy }, 'Processing RFM calculation');
   
-  // TODO: Implement RFM calculation
-  // This will be implemented in Day 6
+  const { calculateRfmForCustomer, calculateRfmForTenant } = await import('./analytics/rfm.service');
+  const { segmentQueue } = await import('./queue');
+  
+  try {
+    if (customerId) {
+      // Single customer RFM calculation (triggered by order event)
+      const result = await calculateRfmForCustomer(tenantId, customerId);
+      
+      if (result) {
+        log.info(
+          { customerId, rfmSegment: result.rfmSegment },
+          'Single customer RFM calculated'
+        );
+        
+        // Trigger segment updates for this customer's segments
+        // Find segments that might need updating based on RFM changes
+        const customerSegments = await prisma.segmentMember.findMany({
+          where: { customerId },
+          select: { segmentId: true },
+        });
+        
+        for (const { segmentId } of customerSegments) {
+          await segmentQueue.add(`segment:${segmentId}`, {
+            tenantId,
+            segmentId,
+            reason: 'rfm_update',
+          }, {
+            delay: 5000, // Small delay to batch multiple RFM updates
+            jobId: `segment-rfm-${segmentId}-${Date.now()}`,
+          });
+        }
+      }
+    } else {
+      // Tenant-wide RFM calculation (scheduled or manual trigger)
+      const result = await calculateRfmForTenant(tenantId, async (processed, total) => {
+        await job.updateProgress({ processed, total });
+      });
+      
+      log.info(
+        { tenantId, updated: result.updated, errors: result.errors },
+        'Tenant RFM calculation completed'
+      );
+      
+      // Refresh all active segments after tenant-wide RFM recalculation
+      const segments = await prisma.segment.findMany({
+        where: { tenantId, isActive: true },
+        select: { id: true },
+      });
+      
+      for (const { id: segmentId } of segments) {
+        await segmentQueue.add(`segment:${segmentId}`, {
+          tenantId,
+          segmentId,
+          reason: 'rfm_update',
+        }, {
+          delay: 1000, // Stagger segment updates
+          jobId: `segment-rfm-batch-${segmentId}-${Date.now()}`,
+        });
+      }
+    }
+  } catch (error) {
+    log.error({ error, tenantId, customerId }, 'RFM calculation failed');
+    throw error;
+  }
 }
 
 /**
@@ -437,8 +499,33 @@ async function processSegmentUpdate(job: Job<SegmentUpdateJobData>): Promise<voi
   const { tenantId, segmentId, reason } = job.data;
   log.info({ jobId: job.id, tenantId, segmentId, reason }, 'Processing segment update');
   
-  // TODO: Implement segment membership update
-  // This will be implemented in Day 7
+  const { computeSegmentMembership } = await import('./segment/membership.service');
+  
+  try {
+    const result = await computeSegmentMembership(segmentId);
+    
+    log.info(
+      { 
+        segmentId,
+        previousCount: result.previousCount,
+        newCount: result.newCount,
+        added: result.added,
+        removed: result.removed,
+        duration: result.duration,
+      },
+      'Segment membership updated'
+    );
+    
+    // Report job progress
+    await job.updateProgress({
+      customerCount: result.newCount,
+      added: result.added,
+      removed: result.removed,
+    });
+  } catch (error) {
+    log.error({ error, segmentId, reason }, 'Segment update failed');
+    throw error;
+  }
 }
 
 /**

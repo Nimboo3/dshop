@@ -14,6 +14,8 @@ import {
 import { shopifyRouter } from './routes/shopify';
 import { webhooksRouter } from './routes/webhooks';
 import { apiRouter } from './routes/api';
+import { segmentsRouter } from './routes/segments.routes';
+import { analyticsRouter } from './routes/analytics.routes';
 import { closeAllQueues, getQueuesHealth } from './services/queue';
 
 const app: Application = express();
@@ -120,6 +122,8 @@ app.get('/ready', async (req: Request, res: Response) => {
 app.use('/auth', shopifyRouter);
 app.use('/webhooks', webhooksRouter);
 app.use('/api', apiRouter);
+app.use('/api/segments', segmentsRouter);
+app.use('/api/analytics', analyticsRouter);
 
 // 404 handler
 app.use(notFoundMiddleware);
