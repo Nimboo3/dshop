@@ -2894,9 +2894,7 @@ Day 12: Documentation + Demo
 
 Write ARCHITECTURE.md (technical decisions)
 Complete README.md with setup guide
-Record 7-minute demo video
-Final deployment verification
-Submit assignment
+
 📋 Complete Feature ChecklistMust Have (Core Assignment)
 
 ✅ OAuth integration with Shopify

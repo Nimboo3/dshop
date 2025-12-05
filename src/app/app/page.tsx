@@ -1,275 +1,187 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useAppBridge } from '@shopify/app-bridge-react';
+import { useState } from 'react';
+import { DollarSign, Users, ShoppingCart, TrendingUp, RefreshCw } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import {
+  KpiCard,
+  RevenueChart,
+  TopCustomersCard,
+  RecentOrdersCard,
+  RfmDistributionChart,
+  DateRangeFilter,
+  PageHeader,
+  ErrorState,
+} from '@/components/dashboard';
+import {
+  useOrderStats,
+  useDailyOrderStats,
+  useTopCustomers,
+  useRfmDistribution,
+} from '@/hooks/use-api';
+import { useShop } from '@/hooks/use-shop';
+import { formatCurrency, formatNumber } from '@/lib/utils';
 
-interface ProductData {
-  product: {
-    id: string;
-    title: string;
-    handle: string;
-    status: string;
-    variants: {
-      edges: Array<{
-        node: {
-          id: string;
-          price: string;
-          barcode: string;
-          createdAt: string;
-        };
-      }>;
-    };
+type DateRange = '7d' | '30d' | '90d' | '365d' | 'custom';
+
+export default function DashboardPage() {
+  const { shop, isLoading: shopLoading, error: shopError } = useShop();
+  const [dateRange, setDateRange] = useState<DateRange>('30d');
+  const [dateParams, setDateParams] = useState<{ startDate?: string; endDate?: string }>({});
+
+  // Fetch data
+  const {
+    data: orderStats,
+    isLoading: orderStatsLoading,
+    error: orderStatsError,
+    refetch: refetchOrderStats,
+  } = useOrderStats(dateParams);
+
+  const {
+    data: dailyStats,
+    isLoading: dailyStatsLoading,
+    error: dailyStatsError,
+  } = useDailyOrderStats(dateParams);
+
+  const {
+    data: topCustomers,
+    isLoading: topCustomersLoading,
+  } = useTopCustomers({ limit: 5 });
+
+  const {
+    data: rfmDistribution,
+    isLoading: rfmLoading,
+  } = useRfmDistribution();
+
+  // Handle date range change
+  const handleDateRangeChange = (range: DateRange, startDate?: string, endDate?: string) => {
+    setDateRange(range);
+    setDateParams({ startDate, endDate });
   };
-  variant?: Array<{
-    id: string;
-    price: string;
-    barcode: string;
-    createdAt: string;
-  }>;
-}
 
-export default function AppIndexPage() {
-  const [isLoading, setIsLoading] = useState(false);
-  const [productData, setProductData] = useState<ProductData | null>(null);
-  
-  let shopify: any;
-  try {
-    shopify = useAppBridge();
-  } catch {
-    shopify = null;
+  // Loading state for shop context
+  if (shopLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-pulse text-muted-foreground">Loading shop context...</div>
+      </div>
+    );
   }
 
-  useEffect(() => {
-    if (productData?.product?.id && shopify) {
-      shopify.toast.show('Product created');
-    }
-  }, [productData?.product?.id, shopify]);
+  // No shop connected
+  if (!shop) {
+    return (
+      <div className="space-y-6">
+        <PageHeader
+          title="Dashboard"
+          description="Welcome to Xeno FDE Platform"
+        />
+        <ErrorState
+          title="No Shop Connected"
+          message="Please connect a Shopify store to view your dashboard data."
+        />
+      </div>
+    );
+  }
 
-  const generateProduct = async () => {
-    setIsLoading(true);
-    try {
-      const response = await fetch('/api/products', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Shop': new URLSearchParams(window.location.search).get('shop') || '',
-        },
-      });
-      const data = await response.json();
-      setProductData(data);
-    } catch (error) {
-      console.error('Failed to create product:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  // Error state
+  if (orderStatsError) {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Dashboard" />
+        <ErrorState
+          message={orderStatsError.message}
+          onRetry={() => refetchOrderStats()}
+        />
+      </div>
+    );
+  }
 
-  const editProduct = () => {
-    if (shopify && productData?.product?.id) {
-      shopify.intents.invoke?.('edit:shopify/Product', {
-        value: productData.product.id,
-      });
-    }
-  };
+  const summary = orderStats?.summary;
 
   return (
-    <div className="app-page">
-      <header className="page-header">
-        <h1>Shopify app template</h1>
-        <button className="primary-button" onClick={generateProduct}>
-          Generate a product
-        </button>
-      </header>
-
-      <section className="section">
-        <h2>Congrats on creating a new Shopify app 🎉</h2>
-        <p>
-          This embedded app template uses{' '}
-          <a
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            App Bridge
-          </a>{' '}
-          interface examples like an{' '}
-          <a href="/app/additional">additional page in the app nav</a>, as well
-          as an{' '}
-          <a
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Admin GraphQL
-          </a>{' '}
-          mutation demo, to provide a starting point for app development.
-        </p>
-      </section>
-
-      <section className="section">
-        <h2>Get started with products</h2>
-        <p>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{' '}
-          <a
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            productCreate
-          </a>{' '}
-          mutation in our API references.
-        </p>
-        <div className="button-group">
-          <button
-            className="button"
-            onClick={generateProduct}
-            disabled={isLoading}
-          >
-            {isLoading ? 'Loading...' : 'Generate a product'}
-          </button>
-          {productData?.product && (
-            <button className="button secondary" onClick={editProduct}>
-              Edit product
-            </button>
-          )}
-        </div>
-
-        {productData?.product && (
-          <div className="output-section">
-            <h3>productCreate mutation</h3>
-            <div className="code-box">
-              <pre>
-                <code>{JSON.stringify(productData.product, null, 2)}</code>
-              </pre>
-            </div>
-
-            {productData.variant && (
-              <>
-                <h3>productVariantsBulkUpdate mutation</h3>
-                <div className="code-box">
-                  <pre>
-                    <code>{JSON.stringify(productData.variant, null, 2)}</code>
-                  </pre>
-                </div>
-              </>
-            )}
+    <div className="space-y-6">
+      {/* Header */}
+      <PageHeader
+        title="Dashboard"
+        description="Your store performance at a glance"
+        actions={
+          <div className="flex items-center gap-2">
+            <DateRangeFilter
+              value={dateRange}
+              onChange={handleDateRangeChange}
+              className="w-[180px]"
+            />
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => refetchOrderStats()}
+              title="Refresh data"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
           </div>
-        )}
-      </section>
+        }
+      />
 
-      <aside className="aside">
-        <section className="section">
-          <h2>App template specs</h2>
-          <p>
-            <span>Framework: </span>
-            <a href="https://nextjs.org/" target="_blank" rel="noopener noreferrer">
-              Next.js 14 (App Router)
-            </a>
-          </p>
-          <p>
-            <span>Backend: </span>
-            <a href="https://expressjs.com/" target="_blank" rel="noopener noreferrer">
-              Express.js
-            </a>
-          </p>
-          <p>
-            <span>Database: </span>
-            <a href="https://www.prisma.io/" target="_blank" rel="noopener noreferrer">
-              Prisma + PostgreSQL
-            </a>
-          </p>
-        </section>
-      </aside>
+      {/* KPI Cards */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <KpiCard
+          title="Total Revenue"
+          value={formatCurrency(summary?.totalRevenue || 0)}
+          icon={DollarSign}
+          isLoading={orderStatsLoading}
+        />
+        <KpiCard
+          title="Total Orders"
+          value={formatNumber(summary?.totalOrders || 0)}
+          icon={ShoppingCart}
+          isLoading={orderStatsLoading}
+        />
+        <KpiCard
+          title="Average Order Value"
+          value={formatCurrency(summary?.averageOrderValue || 0)}
+          icon={TrendingUp}
+          isLoading={orderStatsLoading}
+        />
+        <KpiCard
+          title="Total Customers"
+          value={formatNumber(rfmDistribution?.summary?.totalCustomers || 0)}
+          icon={Users}
+          isLoading={rfmLoading}
+        />
+      </div>
 
-      <style jsx>{`
-        .app-page {
-          padding: 1rem 2rem;
-          max-width: 1200px;
-          margin: 0 auto;
-        }
-        .page-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 2rem;
-        }
-        .page-header h1 {
-          margin: 0;
-        }
-        .primary-button {
-          background-color: #008060;
-          color: white;
-          border: none;
-          padding: 0.75rem 1.5rem;
-          border-radius: 4px;
-          cursor: pointer;
-          font-size: 1rem;
-        }
-        .primary-button:hover {
-          background-color: #006e52;
-        }
-        .section {
-          margin-bottom: 2rem;
-          padding: 1rem;
-          background: #f6f6f7;
-          border-radius: 8px;
-        }
-        .section h2 {
-          margin-top: 0;
-        }
-        .button-group {
-          display: flex;
-          gap: 1rem;
-          margin-top: 1rem;
-        }
-        .button {
-          background-color: #008060;
-          color: white;
-          border: none;
-          padding: 0.5rem 1rem;
-          border-radius: 4px;
-          cursor: pointer;
-        }
-        .button:hover {
-          background-color: #006e52;
-        }
-        .button:disabled {
-          background-color: #ccc;
-          cursor: not-allowed;
-        }
-        .button.secondary {
-          background-color: transparent;
-          color: #008060;
-          border: 1px solid #008060;
-        }
-        .button.secondary:hover {
-          background-color: #f0fdf9;
-        }
-        .output-section {
-          margin-top: 1.5rem;
-        }
-        .output-section h3 {
-          margin-bottom: 0.5rem;
-        }
-        .code-box {
-          background: #1e1e1e;
-          color: #d4d4d4;
-          padding: 1rem;
-          border-radius: 4px;
-          overflow-x: auto;
-          margin-bottom: 1rem;
-        }
-        .code-box pre {
-          margin: 0;
-        }
-        .aside {
-          margin-top: 2rem;
-        }
-        a {
-          color: #008060;
-        }
-      `}</style>
+      {/* Charts Row */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <RevenueChart
+          data={dailyStats?.data || []}
+          isLoading={dailyStatsLoading}
+          title="Revenue Trend"
+          description={`Last ${dateRange === '7d' ? '7 days' : dateRange === '30d' ? '30 days' : dateRange === '90d' ? '90 days' : 'year'}`}
+        />
+        <RfmDistributionChart
+          data={rfmDistribution?.distribution || []}
+          isLoading={rfmLoading}
+          title="Customer Segments"
+          description="RFM-based customer segmentation"
+        />
+      </div>
+
+      {/* Data Cards Row */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <TopCustomersCard
+          customers={topCustomers?.customers || []}
+          isLoading={topCustomersLoading}
+          title="Top Customers"
+          limit={5}
+        />
+        <RecentOrdersCard
+          orders={orderStats?.recentOrders || []}
+          isLoading={orderStatsLoading}
+          title="Recent Orders"
+        />
+      </div>
     </div>
   );
 }

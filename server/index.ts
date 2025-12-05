@@ -16,6 +16,7 @@ import { webhooksRouter } from './routes/webhooks';
 import { apiRouter } from './routes/api';
 import { segmentsRouter } from './routes/segments.routes';
 import { analyticsRouter } from './routes/analytics.routes';
+import { ordersRouter } from './routes/orders.routes';
 import { closeAllQueues, getQueuesHealth } from './services/queue';
 
 const app: Application = express();
@@ -124,6 +125,7 @@ app.use('/webhooks', webhooksRouter);
 app.use('/api', apiRouter);
 app.use('/api/segments', segmentsRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/orders', ordersRouter);
 
 // 404 handler
 app.use(notFoundMiddleware);
