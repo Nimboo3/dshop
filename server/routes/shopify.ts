@@ -5,6 +5,8 @@ import { logger } from '../lib/logger';
 import { config } from '../config/env';
 import { authRateLimiter } from '../middleware';
 import { encrypt, hash } from '../lib/crypto';
+import { registerWebhooks } from '../services/webhooks';
+import { customerSyncQueue, orderSyncQueue } from '../services/queue';
 
 export const shopifyRouter = Router();
 
@@ -76,6 +78,32 @@ shopifyRouter.get('/callback', async (req: Request, res: Response) => {
         planTier: 'FREE',
       },
     });
+
+    // Get tenant ID for webhook registration and initial sync
+    const tenant = await prisma.tenant.findUnique({
+      where: { shopifyDomain: session.shop },
+      select: { id: true },
+    });
+
+    if (tenant) {
+      // Register webhooks in background
+      registerWebhooks(tenant.id).catch((error) => {
+        logger.error({ error, tenantId: tenant.id }, 'Failed to register webhooks');
+      });
+
+      // Queue initial sync jobs
+      await customerSyncQueue.add(`initial-customer-sync:${tenant.id}`, {
+        tenantId: tenant.id,
+        shopDomain: session.shop,
+        mode: 'full',
+      });
+
+      await orderSyncQueue.add(`initial-order-sync:${tenant.id}`, {
+        tenantId: tenant.id,
+        shopDomain: session.shop,
+        mode: 'full',
+      });
+    }
 
     logger.info({ shop: session.shop }, 'OAuth completed successfully');
     

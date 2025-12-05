@@ -22,7 +22,7 @@ function verifyWebhook(req: Request): boolean {
 
   // Body should be a Buffer from raw parser
   const bodyString = Buffer.isBuffer(body) ? body.toString('utf8') : JSON.stringify(body);
-  return verifyWebhookHmac(bodyString, hmac, config.shopifyApiSecret);
+  return verifyWebhookHmac(bodyString, hmac, config.shopify.apiSecret);
 }
 
 // Store webhook event for audit
@@ -188,7 +188,7 @@ webhooksRouter.post('/customers/:action', async (req: Request, res: Response) =>
 
       if (eventId) {
         const tenant = await prisma.tenant.findUnique({
-          where: { shopDomain },
+          where: { shopifyDomain: shopDomain },
           select: { id: true },
         });
 
@@ -230,7 +230,7 @@ webhooksRouter.post('/orders/:action', async (req: Request, res: Response) => {
 
       if (eventId) {
         const tenant = await prisma.tenant.findUnique({
-          where: { shopDomain },
+          where: { shopifyDomain: shopDomain },
           select: { id: true },
         });
 
@@ -267,7 +267,7 @@ webhooksRouter.post('/:topic', async (req: Request, res: Response) => {
 
       // Find tenant and queue for processing
       const tenant = await prisma.tenant.findUnique({
-        where: { shopDomain },
+        where: { shopifyDomain: shopDomain },
         select: { id: true },
       });
 

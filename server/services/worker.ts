@@ -11,6 +11,7 @@ import {
   SegmentUpdateJobData,
   BulkOperationJobData,
 } from './queue';
+import { syncSingleCustomer, syncSingleOrder } from './shopify';
 
 const log = logger.child({ module: 'worker' });
 
@@ -88,33 +89,37 @@ async function handleCustomerWebhook(
 ): Promise<void> {
   const shopifyId = String(payload.id);
   
-  await prisma.customer.upsert({
-    where: {
-      tenantId_shopifyCustomerId: {
-        tenantId,
-        shopifyCustomerId: shopifyId,
-      },
-    },
-    update: {
-      email: payload.email as string || null,
-      firstName: payload.first_name as string || null,
-      lastName: payload.last_name as string || null,
-      phone: payload.phone as string || null,
-      tags: Array.isArray(payload.tags) ? payload.tags : (payload.tags as string)?.split(',') || [],
-      shopifyData: payload as any,
-      updatedAt: new Date(),
-    },
-    create: {
-      tenantId,
-      shopifyCustomerId: shopifyId,
-      email: payload.email as string || null,
-      firstName: payload.first_name as string || null,
-      lastName: payload.last_name as string || null,
-      phone: payload.phone as string || null,
-      tags: Array.isArray(payload.tags) ? payload.tags : (payload.tags as string)?.split(',') || [],
-      shopifyData: payload as any,
-    },
+  const existingCustomer = await prisma.customer.findFirst({
+    where: { tenantId, shopifyId },
   });
+  
+  if (existingCustomer) {
+    await prisma.customer.update({
+      where: { id: existingCustomer.id },
+      data: {
+        email: (payload.email as string) || null,
+        firstName: (payload.first_name as string) || null,
+        lastName: (payload.last_name as string) || null,
+        phone: (payload.phone as string) || null,
+        ordersCount: (payload.orders_count as number) || existingCustomer.ordersCount,
+        totalSpent: payload.total_spent ? parseFloat(payload.total_spent as string) : Number(existingCustomer.totalSpent),
+      },
+    });
+  } else {
+    await prisma.customer.create({
+      data: {
+        tenantId,
+        shopifyId,
+        email: (payload.email as string) || null,
+        firstName: (payload.first_name as string) || null,
+        lastName: (payload.last_name as string) || null,
+        phone: (payload.phone as string) || null,
+        ordersCount: (payload.orders_count as number) || 0,
+        totalSpent: payload.total_spent ? parseFloat(payload.total_spent as string) : 0,
+        shopifyCreatedAt: payload.created_at ? new Date(payload.created_at as string) : new Date(),
+      },
+    });
+  }
 
   log.info({ tenantId, shopifyId }, 'Customer upserted from webhook');
 }
@@ -125,19 +130,15 @@ async function handleCustomerDelete(
 ): Promise<void> {
   const shopifyId = String(payload.id);
   
-  // Soft delete - mark as deleted but keep for analytics
-  await prisma.customer.updateMany({
+  // Delete customer (cascade will handle related records)
+  await prisma.customer.deleteMany({
     where: {
       tenantId,
-      shopifyCustomerId: shopifyId,
-    },
-    data: {
-      // Add a deletedAt field if needed for soft deletes
-      tags: { push: 'deleted' },
+      shopifyId,
     },
   });
 
-  log.info({ tenantId, shopifyId }, 'Customer marked as deleted');
+  log.info({ tenantId, shopifyId }, 'Customer deleted');
 }
 
 async function handleOrderWebhook(
@@ -145,67 +146,97 @@ async function handleOrderWebhook(
   topic: string,
   payload: Record<string, unknown>
 ): Promise<void> {
-  const shopifyOrderId = String(payload.id);
+  const shopifyId = String(payload.id);
   const customerData = payload.customer as Record<string, unknown> | null;
   
   // Find or create customer
   let customerId: string | null = null;
   
   if (customerData?.id) {
-    const customer = await prisma.customer.upsert({
-      where: {
-        tenantId_shopifyCustomerId: {
-          tenantId,
-          shopifyCustomerId: String(customerData.id),
-        },
-      },
-      update: {},
-      create: {
-        tenantId,
-        shopifyCustomerId: String(customerData.id),
-        email: customerData.email as string || null,
-        firstName: customerData.first_name as string || null,
-        lastName: customerData.last_name as string || null,
-      },
+    const shopifyCustomerId = String(customerData.id);
+    let customer = await prisma.customer.findFirst({
+      where: { tenantId, shopifyId: shopifyCustomerId },
     });
+    
+    if (!customer) {
+      customer = await prisma.customer.create({
+        data: {
+          tenantId,
+          shopifyId: shopifyCustomerId,
+          email: (customerData.email as string) || null,
+          firstName: (customerData.first_name as string) || null,
+          lastName: (customerData.last_name as string) || null,
+          ordersCount: 0,
+          totalSpent: 0,
+          shopifyCreatedAt: new Date(),
+        },
+      });
+    }
     customerId = customer.id;
   }
-
-  await prisma.order.upsert({
-    where: {
-      tenantId_shopifyOrderId: {
-        tenantId,
-        shopifyOrderId,
-      },
-    },
-    update: {
-      customerId,
-      totalPrice: parseFloat(payload.total_price as string) || 0,
-      currency: payload.currency as string || 'USD',
-      financialStatus: mapFinancialStatus(payload.financial_status as string),
-      fulfillmentStatus: mapFulfillmentStatus(payload.fulfillment_status as string),
-      shopifyData: payload as any,
-      updatedAt: new Date(),
-    },
-    create: {
-      tenantId,
-      shopifyOrderId,
-      customerId,
-      orderNumber: payload.order_number as number || 0,
-      totalPrice: parseFloat(payload.total_price as string) || 0,
-      currency: payload.currency as string || 'USD',
-      financialStatus: mapFinancialStatus(payload.financial_status as string),
-      fulfillmentStatus: mapFulfillmentStatus(payload.fulfillment_status as string),
-      orderDate: new Date(payload.created_at as string),
-      shopifyData: payload as any,
-    },
+  
+  // Parse line items
+  const rawLineItems = payload.line_items as Array<Record<string, unknown>> || [];
+  const lineItems = rawLineItems.map(item => ({
+    shopifyLineItemId: String(item.id),
+    title: item.title as string,
+    quantity: item.quantity as number,
+    price: parseFloat(item.price as string) || 0,
+    sku: (item.sku as string) || null,
+    productId: item.product_id ? String(item.product_id) : null,
+    variantId: item.variant_id ? String(item.variant_id) : null,
+  }));
+  
+  const orderDate = payload.processed_at 
+    ? new Date(payload.processed_at as string) 
+    : new Date(payload.created_at as string || Date.now());
+  
+  const orderData = {
+    orderNumber: (payload.order_number as number) || 0,
+    orderName: (payload.name as string) || `#${payload.order_number || 0}`,
+    financialStatus: mapFinancialStatus(payload.financial_status as string),
+    fulfillmentStatus: mapFulfillmentStatus(payload.fulfillment_status as string),
+    totalPrice: parseFloat(payload.total_price as string) || 0,
+    subtotalPrice: parseFloat(payload.subtotal_price as string) || 0,
+    totalTax: parseFloat(payload.total_tax as string) || 0,
+    totalDiscounts: parseFloat(payload.total_discounts as string) || 0,
+    currency: (payload.currency as string) || 'USD',
+    lineItems: lineItems as any,
+    lineItemsCount: lineItems.length,
+    orderDate,
+    orderMonth: `${orderDate.getFullYear()}-${String(orderDate.getMonth() + 1).padStart(2, '0')}`,
+    cancelledAt: payload.cancelled_at ? new Date(payload.cancelled_at as string) : null,
+    shopifyUpdatedAt: payload.updated_at ? new Date(payload.updated_at as string) : new Date(),
+  };
+  
+  const existingOrder = await prisma.order.findFirst({
+    where: { tenantId, shopifyId },
   });
+  
+  if (existingOrder) {
+    await prisma.order.update({
+      where: { id: existingOrder.id },
+      data: {
+        ...orderData,
+        customerId,
+      },
+    });
+  } else {
+    await prisma.order.create({
+      data: {
+        tenantId,
+        shopifyId,
+        customerId,
+        ...orderData,
+        shopifyCreatedAt: payload.created_at ? new Date(payload.created_at as string) : new Date(),
+      },
+    });
+  }
 
-  log.info({ tenantId, shopifyOrderId }, 'Order upserted from webhook');
+  log.info({ tenantId, shopifyId }, 'Order upserted from webhook');
 
   // Trigger RFM recalculation for customer
   if (customerId) {
-    // Import rfmQueue dynamically to avoid circular dependency
     const { rfmQueue } = await import('./queue');
     await rfmQueue.add(`rfm:${customerId}`, {
       tenantId,
@@ -219,24 +250,24 @@ async function handleOrderCancellation(
   tenantId: string,
   payload: Record<string, unknown>
 ): Promise<void> {
-  const shopifyOrderId = String(payload.id);
+  const shopifyId = String(payload.id);
   
   await prisma.order.updateMany({
     where: {
       tenantId,
-      shopifyOrderId,
+      shopifyId,
     },
     data: {
-      financialStatus: 'REFUNDED',
-      cancelledAt: new Date(payload.cancelled_at as string || Date.now()),
+      financialStatus: 'VOIDED',
+      cancelledAt: payload.cancelled_at ? new Date(payload.cancelled_at as string) : new Date(),
     },
   });
 
-  log.info({ tenantId, shopifyOrderId }, 'Order cancelled');
+  log.info({ tenantId, shopifyId }, 'Order cancelled');
 }
 
-function mapFinancialStatus(status: string | null): any {
-  const statusMap: Record<string, string> = {
+function mapFinancialStatus(status: string | null): 'PENDING' | 'AUTHORIZED' | 'PARTIALLY_PAID' | 'PAID' | 'PARTIALLY_REFUNDED' | 'REFUNDED' | 'VOIDED' {
+  const statusMap: Record<string, 'PENDING' | 'AUTHORIZED' | 'PARTIALLY_PAID' | 'PAID' | 'PARTIALLY_REFUNDED' | 'REFUNDED' | 'VOIDED'> = {
     pending: 'PENDING',
     authorized: 'AUTHORIZED',
     partially_paid: 'PARTIALLY_PAID',
@@ -248,14 +279,15 @@ function mapFinancialStatus(status: string | null): any {
   return statusMap[status || ''] || 'PENDING';
 }
 
-function mapFulfillmentStatus(status: string | null): any {
-  const statusMap: Record<string, string> = {
-    null: 'UNFULFILLED',
-    partial: 'PARTIAL',
+function mapFulfillmentStatus(status: string | null): 'FULFILLED' | 'PARTIAL' | 'RESTOCKED' | 'PENDING' | null {
+  if (!status) return null;
+  const statusMap: Record<string, 'FULFILLED' | 'PARTIAL' | 'RESTOCKED' | 'PENDING'> = {
     fulfilled: 'FULFILLED',
+    partial: 'PARTIAL',
     restocked: 'RESTOCKED',
+    pending: 'PENDING',
   };
-  return statusMap[status || 'null'] || 'UNFULFILLED';
+  return statusMap[status] || null;
 }
 
 /**
@@ -265,8 +297,60 @@ async function processCustomerSync(job: Job<CustomerSyncJobData>): Promise<void>
   const { tenantId, shopDomain, mode, cursor } = job.data;
   log.info({ jobId: job.id, tenantId, mode }, 'Processing customer sync');
   
-  // TODO: Implement Shopify Admin API sync
-  // This will be implemented in Day 3
+  const { syncCustomers } = await import('./shopify');
+  
+  // Create sync job record
+  const syncJob = await prisma.syncJob.create({
+    data: {
+      tenantId,
+      resourceType: 'CUSTOMERS',
+      mode: mode === 'full' ? 'FULL' : 'INCREMENTAL',
+      status: 'RUNNING',
+      startedAt: new Date(),
+    },
+  });
+  
+  try {
+    const result = await syncCustomers(tenantId, {
+      fullSync: mode === 'full',
+      onProgress: async (processed, total) => {
+        await prisma.syncJob.update({
+          where: { id: syncJob.id },
+          data: {
+            recordsProcessed: processed,
+            totalRecords: total,
+            progressPercent: total ? Math.round((processed / total) * 100) : 0,
+          },
+        });
+        
+        await job.updateProgress({ processed, total });
+      },
+    });
+    
+    await prisma.syncJob.update({
+      where: { id: syncJob.id },
+      data: {
+        status: 'COMPLETED',
+        completedAt: new Date(),
+        recordsProcessed: result.totalProcessed,
+        recordsFailed: result.errors,
+        progressPercent: 100,
+      },
+    });
+    
+    log.info({ tenantId, result }, 'Customer sync completed');
+  } catch (error) {
+    await prisma.syncJob.update({
+      where: { id: syncJob.id },
+      data: {
+        status: 'FAILED',
+        completedAt: new Date(),
+        error: error instanceof Error ? error.message : 'Unknown error',
+        errorStack: error instanceof Error ? error.stack : undefined,
+      },
+    });
+    throw error;
+  }
 }
 
 /**
@@ -276,8 +360,63 @@ async function processOrderSync(job: Job<OrderSyncJobData>): Promise<void> {
   const { tenantId, shopDomain, mode, cursor, since } = job.data;
   log.info({ jobId: job.id, tenantId, mode }, 'Processing order sync');
   
-  // TODO: Implement Shopify Admin API sync
-  // This will be implemented in Day 3
+  const { syncOrders, updateCustomerOrderStats } = await import('./shopify');
+  
+  // Create sync job record
+  const syncJob = await prisma.syncJob.create({
+    data: {
+      tenantId,
+      resourceType: 'ORDERS',
+      mode: mode === 'full' ? 'FULL' : 'INCREMENTAL',
+      status: 'RUNNING',
+      startedAt: new Date(),
+    },
+  });
+  
+  try {
+    const result = await syncOrders(tenantId, {
+      fullSync: mode === 'full',
+      onProgress: async (processed, total) => {
+        await prisma.syncJob.update({
+          where: { id: syncJob.id },
+          data: {
+            recordsProcessed: processed,
+            totalRecords: total,
+            progressPercent: total ? Math.round((processed / total) * 100) : 0,
+          },
+        });
+        
+        await job.updateProgress({ processed, total });
+      },
+    });
+    
+    // Update customer stats after order sync
+    await updateCustomerOrderStats(tenantId);
+    
+    await prisma.syncJob.update({
+      where: { id: syncJob.id },
+      data: {
+        status: 'COMPLETED',
+        completedAt: new Date(),
+        recordsProcessed: result.totalProcessed,
+        recordsFailed: result.errors,
+        progressPercent: 100,
+      },
+    });
+    
+    log.info({ tenantId, result }, 'Order sync completed');
+  } catch (error) {
+    await prisma.syncJob.update({
+      where: { id: syncJob.id },
+      data: {
+        status: 'FAILED',
+        completedAt: new Date(),
+        error: error instanceof Error ? error.message : 'Unknown error',
+        errorStack: error instanceof Error ? error.stack : undefined,
+      },
+    });
+    throw error;
+  }
 }
 
 /**
